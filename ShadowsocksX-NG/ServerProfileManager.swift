@@ -58,6 +58,12 @@ class ServerProfileManager: NSObject {
         }
     }
     
+    func refreshPing() {
+        for profile in profiles {
+            profile.refreshPing()
+        }
+    }
+    
     func getActiveProfile() -> ServerProfile? {
         if let id = activeProfileId {
             for p in profiles {
@@ -79,42 +85,49 @@ class ServerProfileManager: NSObject {
         openPanel.canCreateDirectories = false
         openPanel.canChooseFiles = true
         openPanel.becomeKey()
-        openPanel.begin { (result) -> Void in
-            if (result == NSFileHandlingPanelOKButton && (openPanel.url) != nil) {
-                let fileManager = FileManager.default
-                let filePath:String = (openPanel.url?.path)!
-                if (fileManager.fileExists(atPath: filePath) && filePath.hasSuffix("json")) {
-                    let data = fileManager.contents(atPath: filePath)
-                    let readString = NSString(data: data!, encoding: String.Encoding.utf8.rawValue)!
-                    let readStringData = readString.data(using: String.Encoding.utf8.rawValue)
+        let result = openPanel.runModal()
+        if (result.rawValue == NSFileHandlingPanelOKButton && (openPanel.url) != nil) {
+            let fileManager = FileManager.default
+            let filePath:String = (openPanel.url?.path)!
+            if (fileManager.fileExists(atPath: filePath) && filePath.hasSuffix("json")) {
+                let data = fileManager.contents(atPath: filePath)
+                let readString = NSString(data: data!, encoding: String.Encoding.utf8.rawValue)!
+                let readStringData = readString.data(using: String.Encoding.utf8.rawValue)
+                
+                let jsonArr1 = try! JSONSerialization.jsonObject(with: readStringData!, options: JSONSerialization.ReadingOptions.mutableContainers) as! NSDictionary
+                
+                for item in jsonArr1.object(forKey: "configs") as! [[String: AnyObject]]{
+                    let profile = ServerProfile()
+                    profile.serverHost = item["server"] as! String
+                    profile.serverPort = UInt16((item["server_port"]?.integerValue)!)
+                    profile.method = item["method"] as! String
+                    profile.password = item["password"] as! String
+                    profile.remark = item["remarks"] as! String
                     
-                    let jsonArr1 = try! JSONSerialization.jsonObject(with: readStringData!, options: JSONSerialization.ReadingOptions.mutableContainers) as! NSDictionary
-                    
-                    for item in jsonArr1.object(forKey: "configs") as! [[String: AnyObject]]{
-                        let profile = ServerProfile()
-                        profile.serverHost = item["server"] as! String
-                        profile.serverPort = UInt16((item["server_port"]?.integerValue)!)
-                        profile.method = item["method"] as! String
-                        profile.password = item["password"] as! String
-                        profile.remark = item["remarks"] as! String
-                        self.profiles.append(profile)
-                        self.save()
+                    // Kcptun
+                    profile.enabledKcptun = item["enabled_kcptun"]?.boolValue ?? false
+                    if let kcptun = item["kcptun"] {
+                        profile.kcptunProfile = KcptunProfile.fromDictionary(kcptun as! [String : Any?])
                     }
-                    NotificationCenter.default.post(name: NSNotification.Name(rawValue: NOTIFY_SERVER_PROFILES_CHANGED), object: nil)
-                    let configsCount = (jsonArr1.object(forKey: "configs") as! [[String: AnyObject]]).count
-                    let notification = NSUserNotification()
-                    notification.title = "Import Server Profile succeed!".localized
-                    notification.informativeText = "Successful import \(configsCount) items".localized
-                    NSUserNotificationCenter.default
-                        .deliver(notification)
-                }else{
-                    let notification = NSUserNotification()
-                    notification.title = "Import Server Profile failed!".localized
-                    notification.informativeText = "Invalid config file!".localized
-                    NSUserNotificationCenter.default
-                        .deliver(notification)
-                    return
+                    
+                    self.profiles.append(profile)
+                    self.save()
+                    self.refreshPing()
                 }
+                NotificationCenter.default.post(name: NOTIFY_SERVER_PROFILES_CHANGED, object: nil)
+                let configsCount = (jsonArr1.object(forKey: "configs") as! [[String: AnyObject]]).count
+                let notification = NSUserNotification()
+                notification.title = "Import Server Profile succeed!".localized
+                notification.informativeText = "Successful import \(configsCount) items".localized
+                NSUserNotificationCenter.default
+                    .deliver(notification)
+            }else{
+                let notification = NSUserNotification()
+                notification.title = "Import Server Profile failed!".localized
+                notification.informativeText = "Invalid config file!".localized
+                NSUserNotificationCenter.default
+                    .deliver(notification)
+                return
             }
         }
     }
@@ -141,6 +154,11 @@ class ServerProfileManager: NSObject {
             configProfile.setValue(profile.method, forKey: "method")
             configProfile.setValue(profile.remark, forKey: "remarks")
             configProfile.setValue(profile.remark.data(using: String.Encoding.utf8)?.base64EncodedString(options: NSData.Base64EncodingOptions(rawValue: 0)), forKey: "remarks_base64")
+            
+            // Kcptun
+            configProfile.setValue(profile.enabledKcptun, forKey: "enabled_kcptun")
+            configProfile.setValue(profile.kcptunProfile.toDictionary(), forKey: "kcptun")
+            
             configsArray.add(configProfile)
         }
         jsonArr1.setValue(configsArray, forKey: "configs")
@@ -152,17 +170,16 @@ class ServerProfileManager: NSObject {
         savePanel.allowedFileTypes = ["json"]
         savePanel.nameFieldStringValue = "export.json"
         savePanel.becomeKey()
-        savePanel.begin { (result) -> Void in
-            if (result == NSFileHandlingPanelOKButton && (savePanel.url) != nil) {
-                //write jsonArr1 back to file
-                try! jsonString.write(toFile: (savePanel.url?.path)!, atomically: true, encoding: String.Encoding.utf8)
-                NSWorkspace.shared().selectFile((savePanel.url?.path)!, inFileViewerRootedAtPath: (savePanel.directoryURL?.path)!)
-                let notification = NSUserNotification()
-                notification.title = "Export Server Profile succeed!".localized
-                notification.informativeText = "Successful Export \(self.profiles.count) items".localized
-                NSUserNotificationCenter.default
-                    .deliver(notification)
-            }
+        let result = savePanel.runModal()
+        if (result.rawValue == NSFileHandlingPanelOKButton && (savePanel.url) != nil) {
+            //write jsonArr1 back to file
+            try! jsonString.write(toFile: (savePanel.url?.path)!, atomically: true, encoding: String.Encoding.utf8)
+            NSWorkspace.shared.selectFile((savePanel.url?.path)!, inFileViewerRootedAtPath: (savePanel.directoryURL?.path)!)
+            let notification = NSUserNotification()
+            notification.title = "Export Server Profile succeed!".localized
+            notification.informativeText = "Successful Export \(self.profiles.count) items".localized
+            NSUserNotificationCenter.default
+                .deliver(notification)
         }
     }
     
@@ -174,10 +191,10 @@ class ServerProfileManager: NSObject {
         let destPath = dataPath + "/example-gui-config.json"
         //检测文件是否已经存在，如果存在直接用sharedWorkspace显示
         if fileMgr.fileExists(atPath: destPath) {
-            NSWorkspace.shared().selectFile(destPath, inFileViewerRootedAtPath: dataPath)
+            NSWorkspace.shared.selectFile(destPath, inFileViewerRootedAtPath: dataPath)
         }else{
             try! fileMgr.copyItem(atPath: filePath, toPath: destPath)
-            NSWorkspace.shared().selectFile(destPath, inFileViewerRootedAtPath: dataPath)
+            NSWorkspace.shared.selectFile(destPath, inFileViewerRootedAtPath: dataPath)
         }
     }
 }

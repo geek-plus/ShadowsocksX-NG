@@ -7,21 +7,24 @@
 //
 
 import Cocoa
+import XYPingUtil
 
 
 class ServerProfile: NSObject, NSCopying {
     
-    var uuid: String
+    @objc var uuid: String
 
-    var serverHost: String = ""
-    var serverPort: uint16 = 8379
-    var method:String = "aes-128-cfb"
-    var password:String = ""
-    var remark:String = ""
-    var ota: Bool = false // onetime authentication
+    @objc var serverHost: String = ""
+    @objc var serverPort: uint16 = 8379
+    @objc var method:String = "aes-128-gcm"
+    @objc var password:String = ""
+    @objc var remark:String = ""
+    @objc var ota: Bool = false // onetime authentication
     
-    var enabledKcptun: Bool = false
-    var kcptunProfile = KcptunProfile()
+    @objc var enabledKcptun: Bool = false
+    @objc var kcptunProfile = KcptunProfile()
+    
+    @objc var ping:Int = 0
     
     override init() {
         uuid = UUID().uuidString
@@ -31,7 +34,7 @@ class ServerProfile: NSObject, NSCopying {
         self.uuid = uuid
     }
 
-    convenience init?(url: URL?) {
+    convenience init?(url: URL) {
         self.init()
 
         func padBase64(string: String) -> String {
@@ -44,19 +47,18 @@ class ServerProfile: NSObject, NSCopying {
             }
         }
 
-        func decodeUrl(url: URL?) -> String? {
-            guard let urlStr = url?.absoluteString else {
-                return nil
-            }
+        func decodeUrl(url: URL) -> String? {
+            let urlStr = url.absoluteString
             let index = urlStr.index(urlStr.startIndex, offsetBy: 5)
-            let encodedStr = urlStr.substring(from: index)
-            guard let data = Data(base64Encoded: padBase64(string: encodedStr)) else {
-                return url?.absoluteString
+            let encodedStr = urlStr[index...]
+            guard let data = Data(base64Encoded: padBase64(string: String(encodedStr))) else {
+                return url.absoluteString
             }
             guard let decoded = String(data: data, encoding: String.Encoding.utf8) else {
                 return nil
             }
-            return "ss://\(decoded)"
+            let s = decoded.trimmingCharacters(in: CharacterSet(charactersIn: "\n"))
+            return "ss://\(s)"
         }
 
         guard let decodedUrl = decodeUrl(url: url) else {
@@ -66,17 +68,40 @@ class ServerProfile: NSObject, NSCopying {
             return nil
         }
         guard let host = parsedUrl.host, let port = parsedUrl.port,
-            let method = parsedUrl.user, let password = parsedUrl.password else {
+            let user = parsedUrl.user else {
             return nil
         }
 
         self.serverHost = host
         self.serverPort = UInt16(port)
-        self.method = method
-        self.password = password
 
+        // This can be overriden by the fragment part of SIP002 URL
         remark = parsedUrl.queryItems?
             .filter({ $0.name == "Remark" }).first?.value ?? ""
+
+        if let password = parsedUrl.password {
+            self.method = user.lowercased()
+            self.password = password
+        } else {
+            // SIP002 URL have no password section
+            guard let data = Data(base64Encoded: padBase64(string: user)),
+                let userInfo = String(data: data, encoding: .utf8) else {
+                return nil
+            }
+
+            let parts = userInfo.characters.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+            if parts.count != 2 {
+                return nil
+            }
+            self.method = String(parts[0]).lowercased()
+            self.password = String(parts[1])
+
+            // SIP002 defines where to put the profile name
+            if let profileName = parsedUrl.fragment {
+                self.remark = profileName
+            }
+        }
+
         if let otaStr = parsedUrl.queryItems?
             .filter({ $0.name == "OTA" }).first?.value {
             ota = NSString(string: otaStr).boolValue
@@ -101,6 +126,10 @@ class ServerProfile: NSObject, NSCopying {
         copy.password = self.password
         copy.remark = self.remark
         copy.ota = self.ota
+        
+        copy.enabledKcptun = self.enabledKcptun
+        copy.kcptunProfile = self.kcptunProfile.copy() as! KcptunProfile
+        copy.ping = self.ping
         return copy;
     }
     
@@ -122,6 +151,9 @@ class ServerProfile: NSObject, NSCopying {
             }
             if let kcptunData = data["KcptunProfile"] {
                 profile.kcptunProfile =  KcptunProfile.fromDictionary(kcptunData as! [String:Any?])
+            }
+            if let ping = data["Ping"] as? NSNumber {
+                profile.ping = ping.intValue
             }
         }
 
@@ -147,6 +179,7 @@ class ServerProfile: NSObject, NSCopying {
         d["OTA"] = ota as AnyObject?
         d["EnabledKcptun"] = NSNumber(value: enabledKcptun)
         d["KcptunProfile"] = kcptunProfile.toDictionary() as AnyObject
+        d["Ping"] = NSNumber(value: ping)
         return d
     }
 
@@ -158,7 +191,9 @@ class ServerProfile: NSObject, NSCopying {
         conf["local_port"] = NSNumber(value: UInt16(defaults.integer(forKey: "LocalSocks5.ListenPort")) as UInt16)
         conf["local_address"] = defaults.string(forKey: "LocalSocks5.ListenAddress") as AnyObject?
         conf["timeout"] = NSNumber(value: UInt32(defaults.integer(forKey: "LocalSocks5.Timeout")) as UInt32)
-        conf["auth"] = NSNumber(value: ota as Bool)
+        if ota {
+            conf["auth"] = NSNumber(value: ota as Bool)
+        }
         
         if enabledKcptun {
             let localHost = defaults.string(forKey: "Kcptun.LocalHost")
@@ -176,7 +211,12 @@ class ServerProfile: NSObject, NSCopying {
     
     func toKcptunJsonConfig() -> [String: AnyObject] {
         var conf = kcptunProfile.toJsonConfig()
-        conf["remoteaddr"] = "\(serverHost):\(serverPort)" as AnyObject
+        if serverHost.contains(Character(":")) {
+            conf["remoteaddr"] = "[\(serverHost)]:\(serverPort)" as AnyObject
+        } else {
+            conf["remoteaddr"] = "\(serverHost):\(serverPort)" as AnyObject
+        }
+
         return conf
     }
 
@@ -219,7 +259,7 @@ class ServerProfile: NSObject, NSCopying {
         return true
     }
 
-    func URL() -> Foundation.URL? {
+    private func makeLegacyURL() -> URL? {
         var url = URLComponents()
 
         url.host = serverHost
@@ -247,5 +287,58 @@ class ServerProfile: NSObject, NSCopying {
             return Foundation.URL(string: "ss://\(s)")
         }
         return nil
+    }
+
+    func URL(legacy: Bool = false) -> URL? {
+        // If you want the URL from <= 1.5.1
+        if (legacy) {
+            return self.makeLegacyURL()
+        }
+
+        guard let rawUserInfo = "\(method):\(password)".data(using: .utf8) else {
+            return nil
+        }
+        let paddings = CharacterSet(charactersIn: "=")
+        let userInfo = rawUserInfo.base64EncodedString().trimmingCharacters(in: paddings)
+
+        var items = [URLQueryItem(name: "OTA", value: ota.description)]
+        if enabledKcptun {
+            items.append(URLQueryItem(name: "Kcptun", value: enabledKcptun.description))
+            items.append(contentsOf: kcptunProfile.urlQueryItems())
+        }
+
+        var comps = URLComponents()
+
+        comps.scheme = "ss"
+        comps.host = serverHost
+        comps.port = Int(serverPort)
+        comps.user = userInfo
+        comps.path = "/"  // This is required by SIP0002 for URLs with fragment or query
+        comps.fragment = remark
+        comps.queryItems = items
+
+        let url = try? comps.asURL()
+
+        return url
+    }
+    
+    func title() -> String {
+        var ping = self.ping == 0 ? "" : "(\(self.ping)ms)"
+        if self.ping == -1 {
+            ping = "(\("Timeout".localized))"
+        }
+        if remark.isEmpty {
+            return "\(serverHost):\(serverPort)\(ping)"
+        } else {
+            return "\(remark) (\(serverHost):\(serverPort))\(ping)"
+        }
+    }
+    
+    func refreshPing() {
+        PingUtil.pingHost(serverHost, success: { (ping) in
+            self.ping = ping
+        }, failure: {
+            NSLog("Ping %@ fail", self.serverHost)
+        })
     }
 }

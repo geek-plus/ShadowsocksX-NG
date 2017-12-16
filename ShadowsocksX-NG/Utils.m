@@ -56,9 +56,13 @@ void ScanQRCodeOnScreen() {
             NSLog(@"%@", feature.messageString);
             if ( [feature.messageString hasPrefix:@"ss://"] )
             {
-                [foundSSUrls addObject:[NSURL URLWithString:feature.messageString]];
+                NSURL *url = [NSURL URLWithString:feature.messageString];
+                if (url) {
+                    [foundSSUrls addObject:url];
+                }
             }
         }
+         CGImageRelease(image);
     }
     
     free(displays);
